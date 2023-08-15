@@ -1,12 +1,11 @@
 import openpyxl
 import docx
+import concurrent.futures
 import streamlit as st
-# from dotenv import load_dotenv
 from PyPDF2 import PdfReader
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.embeddings import HuggingFaceInstructEmbeddings
 from langchain.vectorstores import FAISS
-
 from langchain.memory import ConversationBufferMemory
 from langchain.chains import ConversationalRetrievalChain
 from langchain.llms import LlamaCpp
@@ -23,6 +22,7 @@ def get_word_text(docx_files):
             text += paragraph.text + '\n'
     return text
 
+
 def get_excel_text(excel_files):
     text = ""
     for excel_file in excel_files:
@@ -33,6 +33,7 @@ def get_excel_text(excel_files):
                 text += ' '.join(str(cell) for cell in row) + '\n'
     return text
 
+
 def get_pdf_text(pdf_docs):
     text = ""
     for pdf in pdf_docs:
@@ -41,28 +42,67 @@ def get_pdf_text(pdf_docs):
             text += page.extract_text()
     return text
 
-# 
-def get_text_chunks(text):
+
+# def get_text_chunks(text):
+#     text_splitter = CharacterTextSplitter(
+#         separator="\n",
+#         chunk_size=1000,
+#         chunk_overlap=200,
+#         length_function=len
+#     )
+#     chunks = text_splitter.split_text(text)
+#     return chunks
+
+def get_text_chunks(text, chunk_size=256):
     text_splitter = CharacterTextSplitter(
         separator="\n",
-        chunk_size=1000,
-        chunk_overlap=200,
+        chunk_size=chunk_size,
+        chunk_overlap=100,
         length_function=len
     )
     chunks = text_splitter.split_text(text)
     return chunks
 
 
-def get_vectorstore(text_chunks):
+# def get_vectorstore(text_chunks):
+#     embeddings = HuggingFaceInstructEmbeddings(model_name="hkunlp/instructor-xl")
+#     vectorstore = FAISS.from_texts(texts=text_chunks, embedding=embeddings)
+#     return vectorstore
+
+
+# def get_vectorstore(text_chunks, batch_size=8):
+#     embeddings = HuggingFaceInstructEmbeddings(model_name="hkunlp/instructor-xl")
+#     vectorstore = FAISS.from_texts_batched(texts=text_chunks, embedding=embeddings, batch_size=batch_size)
+#     return vectorstore
+
+
+# batch and parallel processing..
+def get_vectorstore_parallel(text_chunks, executor):
     embeddings = HuggingFaceInstructEmbeddings(model_name="hkunlp/instructor-xl")
-    vectorstore = FAISS.from_texts(texts=text_chunks, embedding=embeddings)
+    
+    def process_batch(batch):
+        return embeddings.encode_batch(batch)
+
+    batch_size = 4
+    encoded_chunks = []
+    for i in range(0, len(text_chunks), batch_size):
+        batch = text_chunks[i:i + batch_size]
+        results = list(executor.map(process_batch, batch))
+        for result in results:
+            encoded_chunks.extend(result)
+
+    vectorstore = FAISS.from_embeddings(embeddings=encoded_chunks, batch_size=batch)
     return vectorstore
+
 
 
 def get_conversation_chain(vectorstore):
     model_path="llama-2-13b-chat.ggmlv3.q5_1.bin" # https://huggingface.co/TheBloke/Llama-2-13B-chat-GGML
-    n_gpu_layers = 40  
-    n_batch = 256   
+    # n_gpu_layers = 40  
+    n_gpu_layers = 20  
+
+    # n_batch = 256   
+    n_batch = 156 
 
     callback_handler = StreamingStdOutCallbackHandler()  # Initialize the specific callback handler
     callback_manager = CallbackManager(handlers=[callback_handler])
@@ -130,7 +170,14 @@ def main():
                 text_chunks = get_text_chunks(raw_text)
 
                 # create vector store
-                vectorstore = get_vectorstore(text_chunks)
+                # vectorstore = get_vectorstore(text_chunks)
+
+                # Number of workers for parallel processing
+                num_workers = 4  # Adjust the number of workers as needed
+
+                # create vector store using parallel processing
+                with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+                    vectorstore = get_vectorstore_parallel(text_chunks, executor)
 
                 # create conversation chain
                 st.session_state.conversation = get_conversation_chain(
@@ -139,4 +186,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
